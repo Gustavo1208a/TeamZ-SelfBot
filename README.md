@@ -30,7 +30,6 @@ Painel de controle para selfbot do Discord, construído com React, Vite, TypeScr
 ## Instalação
 
 ```bash
-cd "TeamZ Tools"
 npm install
 ```
 
