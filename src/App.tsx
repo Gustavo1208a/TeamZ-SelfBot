@@ -69,7 +69,8 @@ type BotFeature =
   | "nuke"
   | "webhook"
   | "rpc"
-  | "cloner";
+  | "cloner"
+  | "messages";
 
 // ========== ACCOUNT SELECTOR COMPONENT ==========
 function AccountSelector({
@@ -167,11 +168,10 @@ function AccountSelector({
                   onSelect(acc);
                   setOpen(false);
                 }}
-                className={`w-full flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-all ${
-                  currentUserId === acc.id
-                    ? "bg-white/[0.08] text-white"
-                    : "text-neutral-400 hover:bg-white/[0.04] hover:text-white"
-                }`}
+                className={`w-full flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-all ${currentUserId === acc.id
+                  ? "bg-white/[0.08] text-white"
+                  : "text-neutral-400 hover:bg-white/[0.04] hover:text-white"
+                  }`}
               >
                 <img
                   src={getAvatarUrl(acc)}
@@ -300,6 +300,18 @@ export function App() {
   const [clonerTotal, setClonerTotal] = useState(0);
   const [clonerPhase, setClonerPhase] = useState("");
   const [clonerDelay, setClonerDelay] = useState(600);
+
+  //Cloner Messages
+  const [messagesOrigin, setMessagesOrigin] = useState("");
+  const [messagesTarget, setMessagesTarget] = useState("");
+  const [messagesChannelsOrigin, setMessagesChannelsOrigin] = useState<DiscordChannel[]>([]);
+  const [messagesChannelsTarget, setMessagesChannelsTarget] = useState<DiscordChannel[]>([]);
+  const [messagesServerOrigin, setMessagesServerOrigin] = useState("");
+  const [messagesServerTarget, setMessagesServerTarget] = useState("");
+  const [messagesProgress, setMessagesProgress] = useState(0);
+  const [messagesTotal, setMessagesTotal] = useState(0);
+  const [messagesPhase, setMessagesPhase] = useState("");
+  const [messagesDelay, setMessagesDelay] = useState(600);
 
   const logsRef = useRef<HTMLDivElement>(null);
   const logIdRef = useRef(0);
@@ -492,6 +504,28 @@ export function App() {
       addLog("info", "CHANNELS", `${data.length} canais carregados`);
     } catch (_e) {
       addLog("error", "CHANNELS", "Falha ao carregar canais");
+    }
+  };
+
+  const loadChannels2 = async (guildId: string): Promise<DiscordChannel[]> => {
+    if (!guildId) return [];
+
+    try {
+      const resp = await fetch(
+        `https://discord.com/api/v9/guilds/${guildId}/channels`,
+        { headers: headers() }
+      );
+
+      if (!resp.ok) throw new Error();
+
+      const data: DiscordChannel[] = await resp.json();
+
+      addLog("info", "CHANNELS", `${data.length} canais carregados`);
+
+      return data.filter((c) => c.type === 0 || c.type === 5);
+    } catch {
+      addLog("error", "CHANNELS", "Falha ao carregar canais");
+      return [];
     }
   };
 
@@ -1704,6 +1738,139 @@ export function App() {
     setClonerPhase("");
   };
 
+  // ========== CLONER MESSAGE ==========
+  const executeClonerMessage = async () => {
+    if (!messagesOrigin || !messagesTarget) {
+      addLog("error", "MESSAGES", "Selecione chat de origem e destino!");
+      return;
+    }
+
+    if (messagesOrigin === messagesTarget) {
+      addLog("error", "MESSAGES", "Origem e destino nao podem ser iguais!");
+      return;
+    }
+
+    setIsRunning(true);
+    abortRef.current = false;
+
+    setMessagesProgress(0);
+    setMessagesTotal(0);
+    setMessagesPhase("");
+
+    const originName = messagesChannelsOrigin.find((c) => c.id === messagesOrigin)?.name ?? messagesOrigin;
+    const targetName = messagesChannelsTarget.find((c) => c.id === messagesTarget)?.name ?? messagesTarget;
+
+    addLog("system", "MESSAGES", "--------------------------------");
+    addLog("system", "MESSAGES", "Iniciando clonagem de mensagens...");
+    addLog("info", "MESSAGES", `Origem: ${originName}`);
+    addLog("info", "MESSAGES", `Destino: ${targetName}`);
+    addLog("info", "MESSAGES", `Delay: ${messagesDelay}ms`);
+    addLog("system", "MESSAGES", "--------------------------------");
+
+    try {
+      // FASE 1 - COLETAR MENSAGENS
+      setMessagesPhase("Obtendo mensagens");
+      addLog("system", "MESSAGES", "[Fase 1] Coletando mensagens...");
+
+      const allMessages: any[] = [];
+      let before: string | undefined;
+
+      while (!abortRef.current) {
+        const resp = await fetch(before
+          ? `https://discord.com/api/v9/channels/${messagesOrigin}/messages?limit=100&before=${before}`
+          : `https://discord.com/api/v9/channels/${messagesOrigin}/messages?limit=100`,
+          { headers: headers(), });
+
+        if (!resp.ok) throw new Error(`Falha ao buscar mensagens (${resp.status})`);
+
+        const batch = await resp.json();
+        if (!batch.length) break;
+
+        allMessages.push(...batch);
+        before = batch[batch.length - 1].id;
+
+        addLog("info", "MESSAGES", `${allMessages.length} mensagens carregadas`);
+        await sleep(300);
+      }
+
+      allMessages.reverse();
+      setMessagesTotal(allMessages.length);
+
+      addLog("success", "MESSAGES", `${allMessages.length} mensagens encontradas`);
+      await sleep(1000);
+
+      // FASE 2 - ENVIAR MENSAGENS
+
+      setMessagesPhase("Clonando mensagens");
+      addLog("system", "MESSAGES", "[Fase 2] Enviando mensagens...");
+
+      let cloned = 0;
+
+      for (const msg of allMessages) {
+        if (abortRef.current) break;
+
+        try {
+          let content = "";
+
+          if (msg.author?.username) content += `**${msg.author.username}**\n`;
+          if (msg.content) content += msg.content;
+
+          if (msg.attachments?.length) {
+            content += "\n\n";
+
+            for (const attachment of msg.attachments) {
+              content += `${attachment.url}\n`;
+            }
+          }
+
+          if (!content.trim()) {
+            setMessagesProgress((prev) => prev + 1);
+            continue;
+          }
+
+          const resp = await fetch(`https://discord.com/api/v9/channels/${messagesTarget}/messages`,
+            { method: "POST", headers: headers(), body: JSON.stringify({ content: content.substring(0, 2000) }) }
+          );
+
+          if (resp.ok) {
+            cloned++;
+            setMessagesProgress((prev) => prev + 1);
+            addLog("success", "MESSAGES", `Mensagem ${cloned}/${allMessages.length}`);
+          } else if (resp.status === 429) {
+            const err = await resp.json();
+            const wait = (err.retry_after || 3) * 1000;
+            addLog("warning", "MESSAGES", `Rate limit! Esperando ${wait / 1000}s...`);
+            await sleep(wait);
+            continue;
+          } else {
+            addLog("error", "MESSAGES", `Falha ao enviar mensagem ${msg.id}`);
+          }
+        } catch {
+          addLog("error", "MESSAGES", `Erro ao clonar mensagem ${msg.id}`);
+        }
+
+        await sleep(messagesDelay);
+      }
+
+      // FINALIZAÇÃO
+
+      addLog("system", "MESSAGES", "--------------------------------");
+
+      if (abortRef.current) {
+        addLog("warning","MESSAGES","Clonagem interrompida pelo usuario!");
+      } else {
+        addLog("success","MESSAGES",`Clonagem concluida! ${cloned} mensagens clonadas`);
+      }
+
+      addLog("system", "MESSAGES", "--------------------------------");
+    } catch (e) {
+      addLog("error", "MESSAGES", `Erro fatal: ${e}`);
+    }
+
+    setIsRunning(false);
+    setMessagesPhase("");
+  };
+
   // ========== EXECUTE ==========
   const executeFeature = () => {
     switch (activeFeature) {
@@ -1734,6 +1901,9 @@ export function App() {
       case "cloner":
         executeCloner();
         break;
+      case "messages":
+        executeClonerMessage();
+        break;
     }
   };
 
@@ -1747,16 +1917,17 @@ export function App() {
     label: string;
     desc: string;
   }[] = [
-    { key: "spam", icon: "fa-comment-dots", label: "Spam", desc: "Envio em massa" },
-    { key: "dm_all", icon: "fa-envelope", label: "DM Mass", desc: "DMs em massa" },
-    { key: "status", icon: "fa-circle", label: "Status", desc: "Alterar status" },
-    { key: "nickname", icon: "fa-pen", label: "Nick", desc: "Mudar apelido" },
-    { key: "raid", icon: "fa-bolt", label: "Raid", desc: "Spam em canais" },
-    { key: "nuke", icon: "fa-bomb", label: "Nuke", desc: "Destruir server" },
-    { key: "webhook", icon: "fa-link", label: "Webhook", desc: "Spam webhook" },
-    { key: "rpc", icon: "fa-gamepad", label: "RPC", desc: "Rich Presence" },
-    { key: "cloner", icon: "fa-clone", label: "Cloner", desc: "Clonar servidor" },
-  ];
+      { key: "spam", icon: "fa-comment-dots", label: "Spam", desc: "Envio em massa" },
+      { key: "dm_all", icon: "fa-envelope", label: "DM Mass", desc: "DMs em massa" },
+      { key: "status", icon: "fa-circle", label: "Status", desc: "Alterar status" },
+      { key: "nickname", icon: "fa-pen", label: "Nick", desc: "Mudar apelido" },
+      { key: "raid", icon: "fa-bolt", label: "Raid", desc: "Spam em canais" },
+      { key: "nuke", icon: "fa-bomb", label: "Nuke", desc: "Destruir server" },
+      { key: "webhook", icon: "fa-link", label: "Webhook", desc: "Spam webhook" },
+      { key: "rpc", icon: "fa-gamepad", label: "RPC", desc: "Rich Presence" },
+      { key: "cloner", icon: "fa-clone", label: "Cloner", desc: "Clonar servidor" },
+      { key: "messages", icon: "fa-message", label: "Cloner Messages", desc: "Clonar Mensagens" },
+    ];
 
   const getLogColor = (type: LogEntry["type"]) => {
     switch (type) {
@@ -2052,11 +2223,10 @@ export function App() {
             {user && (
               <button
                 onClick={handleSaveCurrentAccount}
-                className={`flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-medium transition-all ${
-                  isCurrentAccountSaved
-                    ? "border-emerald-500/20 text-emerald-400"
-                    : "border-white/[0.08] text-neutral-500 hover:text-white hover:border-white/20"
-                }`}
+                className={`flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-medium transition-all ${isCurrentAccountSaved
+                  ? "border-emerald-500/20 text-emerald-400"
+                  : "border-white/[0.08] text-neutral-500 hover:text-white hover:border-white/20"
+                  }`}
                 style={{ background: "rgba(255,255,255,0.02)" }}
                 title={
                   isCurrentAccountSaved
@@ -2119,11 +2289,10 @@ export function App() {
                 <button
                   key={f.key}
                   onClick={() => setActiveFeature(f.key)}
-                  className={`w-full flex items-center gap-3 rounded-xl px-4 py-3 text-left transition-all group ${
-                    activeFeature === f.key
-                      ? "border-white/[0.1] text-white"
-                      : "border-transparent text-neutral-500 hover:text-neutral-300"
-                  }`}
+                  className={`w-full flex items-center gap-3 rounded-xl px-4 py-3 text-left transition-all group ${activeFeature === f.key
+                    ? "border-white/[0.1] text-white"
+                    : "border-transparent text-neutral-500 hover:text-neutral-300"
+                    }`}
                   style={{
                     background:
                       activeFeature === f.key
@@ -2133,11 +2302,10 @@ export function App() {
                   }}
                 >
                   <div
-                    className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all ${
-                      activeFeature === f.key
-                        ? "bg-white text-black"
-                        : "bg-white/[0.04] text-neutral-500 group-hover:text-neutral-300"
-                    }`}
+                    className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all ${activeFeature === f.key
+                      ? "bg-white text-black"
+                      : "bg-white/[0.04] text-neutral-500 group-hover:text-neutral-300"
+                      }`}
                   >
                     <i className={`fa-solid ${f.icon} text-xs`} />
                   </div>
@@ -2379,11 +2547,10 @@ export function App() {
                         <button
                           key={s.v}
                           onClick={() => setStatusType(s.v)}
-                          className={`flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-xs font-medium transition-all ${
-                            statusType === s.v
-                              ? "border-white/20 text-white"
-                              : "border-white/[0.06] text-neutral-500 hover:text-neutral-300"
-                          }`}
+                          className={`flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-xs font-medium transition-all ${statusType === s.v
+                            ? "border-white/20 text-white"
+                            : "border-white/[0.06] text-neutral-500 hover:text-neutral-300"
+                            }`}
                           style={{
                             background:
                               statusType === s.v
@@ -2635,11 +2802,10 @@ export function App() {
                         <button
                           key={t.value}
                           onClick={() => setRpcType(t.value)}
-                          className={`flex flex-col items-center gap-1.5 rounded-xl border px-2 py-3 text-[10px] font-medium transition-all ${
-                            rpcType === t.value
-                              ? "border-white/20 text-white"
-                              : "border-white/[0.06] text-neutral-600 hover:text-neutral-400"
-                          }`}
+                          className={`flex flex-col items-center gap-1.5 rounded-xl border px-2 py-3 text-[10px] font-medium transition-all ${rpcType === t.value
+                            ? "border-white/20 text-white"
+                            : "border-white/[0.06] text-neutral-600 hover:text-neutral-400"
+                            }`}
                           style={{
                             background:
                               rpcType === t.value
@@ -2876,11 +3042,10 @@ export function App() {
                         <button
                           key={opt.label}
                           onClick={() => opt.set(!opt.state)}
-                          className={`flex items-center gap-3 rounded-xl border px-4 py-3 text-left transition-all ${
-                            opt.state
-                              ? "border-white/15 text-white"
-                              : "border-white/[0.06] text-neutral-600"
-                          }`}
+                          className={`flex items-center gap-3 rounded-xl border px-4 py-3 text-left transition-all ${opt.state
+                            ? "border-white/15 text-white"
+                            : "border-white/[0.06] text-neutral-600"
+                            }`}
                           style={{
                             background: opt.state
                               ? "rgba(255,255,255,0.05)"
@@ -2888,11 +3053,10 @@ export function App() {
                           }}
                         >
                           <div
-                            className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all ${
-                              opt.state
-                                ? "bg-white text-black"
-                                : "bg-white/[0.04]"
-                            }`}
+                            className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all ${opt.state
+                              ? "bg-white text-black"
+                              : "bg-white/[0.04]"
+                              }`}
                           >
                             <i className={`fa-solid ${opt.icon} text-xs`} />
                           </div>
@@ -2903,11 +3067,10 @@ export function App() {
                             </p>
                           </div>
                           <div
-                            className={`w-4 h-4 rounded-md border flex items-center justify-center transition-all ${
-                              opt.state
-                                ? "bg-white border-white"
-                                : "border-white/15"
-                            }`}
+                            className={`w-4 h-4 rounded-md border flex items-center justify-center transition-all ${opt.state
+                              ? "bg-white border-white"
+                              : "border-white/15"
+                              }`}
                           >
                             {opt.state && (
                               <i className="fa-solid fa-check text-[8px] text-black" />
@@ -2929,11 +3092,10 @@ export function App() {
                         <button
                           key={opt.value}
                           onClick={() => setClonerDelay(opt.value)}
-                          className={`flex items-center justify-center rounded-xl border px-3 py-2.5 text-xs font-medium transition-all ${
-                            clonerDelay === opt.value
-                              ? "border-white/20 text-white"
-                              : "border-white/[0.06] text-neutral-500 hover:text-neutral-300"
-                          }`}
+                          className={`flex items-center justify-center rounded-xl border px-3 py-2.5 text-xs font-medium transition-all ${clonerDelay === opt.value
+                            ? "border-white/20 text-white"
+                            : "border-white/[0.06] text-neutral-500 hover:text-neutral-300"
+                            }`}
                           style={{
                             background:
                               clonerDelay === opt.value
@@ -2953,11 +3115,10 @@ export function App() {
                       onClick={() =>
                         setClonerDeleteExisting(!clonerDeleteExisting)
                       }
-                      className={`w-full flex items-center gap-3 rounded-xl border px-4 py-3 text-left transition-all ${
-                        clonerDeleteExisting
-                          ? "border-red-500/20 text-red-400"
-                          : "border-white/[0.06] text-neutral-500"
-                      }`}
+                      className={`w-full flex items-center gap-3 rounded-xl border px-4 py-3 text-left transition-all ${clonerDeleteExisting
+                        ? "border-red-500/20 text-red-400"
+                        : "border-white/[0.06] text-neutral-500"
+                        }`}
                       style={{
                         background: clonerDeleteExisting
                           ? "rgba(239,68,68,0.05)"
@@ -2965,11 +3126,10 @@ export function App() {
                       }}
                     >
                       <div
-                        className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all ${
-                          clonerDeleteExisting
-                            ? "bg-red-500/20 text-red-400"
-                            : "bg-white/[0.04]"
-                        }`}
+                        className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all ${clonerDeleteExisting
+                          ? "bg-red-500/20 text-red-400"
+                          : "bg-white/[0.04]"
+                          }`}
                       >
                         <i className="fa-solid fa-trash text-xs" />
                       </div>
@@ -2982,11 +3142,10 @@ export function App() {
                         </p>
                       </div>
                       <div
-                        className={`w-4 h-4 rounded-md border flex items-center justify-center transition-all ${
-                          clonerDeleteExisting
-                            ? "bg-red-500 border-red-500"
-                            : "border-white/15"
-                        }`}
+                        className={`w-4 h-4 rounded-md border flex items-center justify-center transition-all ${clonerDeleteExisting
+                          ? "bg-red-500 border-red-500"
+                          : "border-white/15"
+                          }`}
                       >
                         {clonerDeleteExisting && (
                           <i className="fa-solid fa-check text-[8px] text-white" />
@@ -3065,20 +3224,256 @@ export function App() {
                 </div>
               )}
 
+              {/* MESSAGES */}
+              {activeFeature === "messages" && (
+                <div className="space-y-5">
+                  {/* Guild Selection */}
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className={labelClass}>
+                        <i className="fa-solid fa-upload mr-1.5" />
+                        Servidor Origem
+                      </label>
+                      <select
+                        value={messagesServerOrigin}
+                        onChange={async (e) => {
+                          setMessagesServerOrigin(e.target.value);
+                          const channels = await loadChannels2(e.target.value);
+                          setMessagesChannelsOrigin(channels);
+                        }}
+                        className={
+                          inputClass + " appearance-none cursor-pointer"
+                        }
+                        style={inputStyle}
+                      >
+                        <option value="">Selecione a origem...</option>
+                        {guilds.map((g) => (
+                          <option key={g.id} value={g.id}>
+                            {g.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className={labelClass}>
+                        <i className="fa-solid fa-download mr-1.5" />
+                        Servidor Destino
+                      </label>
+                      <select
+                        value={messagesServerTarget}
+                        onChange={async (e) => {
+                          setMessagesServerTarget(e.target.value);
+                          const channels = await loadChannels2(e.target.value);
+                          setMessagesChannelsTarget(channels);
+                        }}
+                        className={
+                          inputClass + " appearance-none cursor-pointer"
+                        }
+                        style={inputStyle}
+                      >
+                        <option value="">Selecione o destino...</option>
+                        {guilds.map((g) => (
+                          <option key={g.id} value={g.id}>
+                            {g.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Channel Selection */}
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className={labelClass}>
+                        <i className="fa-solid fa-upload mr-1.5" />
+                        Canal Origem
+                      </label>
+                      <select
+                        value={messagesOrigin}
+                        onChange={(e) => setMessagesOrigin(e.target.value)}
+                        className={inputClass + " appearance-none cursor-pointer"}
+                        style={inputStyle}
+                      >
+                        <option value="">Selecione o canal...</option>
+                        {messagesChannelsOrigin.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            #{c.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className={labelClass}>
+                        <i className="fa-solid fa-download mr-1.5" />
+                        Canal Destino
+                      </label>
+                      <select
+                        value={messagesTarget}
+                        onChange={(e) => setMessagesTarget(e.target.value)}
+                        className={inputClass + " appearance-none cursor-pointer"}
+                        style={inputStyle}
+                      >
+                        <option value="">Selecione o Servidor...</option>
+                        {messagesChannelsTarget.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            #{c.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Direction */}
+                  {messagesOrigin &&
+                    messagesTarget &&
+                    messagesOrigin !== messagesTarget && (
+                      <div
+                        className="flex items-center gap-3 rounded-xl border border-white/[0.06] px-4 py-3"
+                        style={{ background: "rgba(255,255,255,0.02)" }}
+                      >
+                        <div className="flex items-center gap-2 flex-1 min-w-0">
+                          <i className="fa-solid fa-hashtag text-xs text-neutral-500" />
+                          <span className="text-xs text-white font-medium truncate">
+                            {
+                              messagesChannelsOrigin.find(
+                                (c) => c.id === messagesOrigin
+                              )?.name
+                            }
+                          </span>
+                        </div>
+
+                        <i className="fa-solid fa-arrow-right text-xs text-neutral-600 shrink-0" />
+
+                        <div className="flex items-center gap-2 flex-1 min-w-0 justify-end">
+                          <i className="fa-solid fa-hashtag text-xs text-neutral-500" />
+                          <span className="text-xs text-white font-medium truncate">
+                            {
+                              messagesChannelsTarget.find(
+                                (c) => c.id === messagesTarget
+                              )?.name
+                            }
+                          </span>
+                        </div>
+                      </div>
+                    )}
+
+                  {/* Delay */}
+                  <div>
+                    <label className={labelClass}>
+                      <i className="fa-solid fa-clock mr-1.5" />
+                      Delay entre mensagens
+                    </label>
+
+                    <div className="grid grid-cols-4 gap-2">
+                      {delayOptions.map((opt) => (
+                        <button
+                          key={opt.value}
+                          onClick={() => setMessagesDelay(opt.value)}
+                          className={`flex items-center justify-center rounded-xl border px-3 py-2.5 text-xs font-medium transition-all ${messagesDelay === opt.value
+                            ? "border-white/20 text-white"
+                            : "border-white/[0.06] text-neutral-500 hover:text-neutral-300"
+                            }`}
+                          style={{
+                            background:
+                              messagesDelay === opt.value
+                                ? "rgba(255,255,255,0.06)"
+                                : "rgba(255,255,255,0.02)",
+                          }}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Progress */}
+                  {isRunning && activeFeature === "messages" && (
+                    <div
+                      className="rounded-xl border border-white/[0.06] p-4"
+                      style={{ background: "rgba(255,255,255,0.02)" }}
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-[11px] font-medium text-neutral-400">
+                          {messagesPhase || "Copiando mensagens..."}
+                        </span>
+
+                        <span className="text-[11px] text-neutral-500">
+                          {messagesProgress}/{messagesTotal}
+                        </span>
+                      </div>
+
+                      <div
+                        className="h-2 w-full overflow-hidden rounded-full"
+                        style={{ background: "rgba(255,255,255,0.05)" }}
+                      >
+                        <div
+                          className="h-full rounded-full transition-all duration-500"
+                          style={{
+                            width:
+                              messagesTotal > 0
+                                ? `${(messagesProgress /
+                                  messagesTotal) *
+                                100
+                                }%`
+                                : "0%",
+                            background:
+                              "linear-gradient(90deg, rgba(255,255,255,0.3), rgba(255,255,255,0.7))",
+                          }}
+                        />
+                      </div>
+
+                      {messagesTotal > 0 && (
+                        <p className="text-[10px] text-neutral-600 mt-1.5 text-right">
+                          {Math.round(
+                            (messagesProgress /
+                              messagesTotal) *
+                            100
+                          )}
+                          %
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Info */}
+                  <div
+                    className="rounded-xl border border-white/[0.06] p-3"
+                    style={{ background: "rgba(255,255,255,0.02)" }}
+                  >
+                    <div className="flex gap-2">
+                      <i className="fa-solid fa-circle-info text-xs text-neutral-500 mt-0.5" />
+                      <div>
+                        <p className="text-[11px] text-neutral-400 leading-relaxed">
+                          Copia todas as{" "}
+                          <span className="text-white font-medium">
+                            mensagens do canal de origem
+                          </span>{" "}
+                          para o canal destino, respeitando o delay configurado.
+                        </p>
+
+                        <p className="text-[10px] text-neutral-600 mt-1">
+                          Delays menores podem causar rate limits do Discord.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* ACTION BUTTONS */}
               <div className="flex gap-3 mt-6">
                 <button
                   onClick={executeFeature}
                   disabled={isRunning && activeFeature !== "rpc"}
-                  className={`flex-1 rounded-xl py-3.5 text-sm font-semibold transition-all active:scale-[0.98] disabled:opacity-30 disabled:cursor-not-allowed ${
-                    activeFeature === "nuke"
-                      ? "bg-red-500 hover:bg-red-600 text-white"
-                      : activeFeature === "raid"
-                        ? "bg-amber-500 hover:bg-amber-600 text-black"
-                        : activeFeature === "rpc" && rpcActive
-                          ? "bg-red-500 hover:bg-red-600 text-white"
-                          : "bg-white hover:bg-neutral-200 text-black"
-                  }`}
+                  className={`flex-1 rounded-xl py-3.5 text-sm font-semibold transition-all active:scale-[0.98] disabled:opacity-30 disabled:cursor-not-allowed ${activeFeature === "nuke"
+                    ? "bg-red-500 hover:bg-red-600 text-white"
+                    : activeFeature === "raid"
+                      ? "bg-amber-500 hover:bg-amber-600 text-black"
+                      : activeFeature === "rpc" && rpcActive
+                        ? "bg-red-500 hover:bg-red-600 text-white"
+                        : "bg-white hover:bg-neutral-200 text-black"
+                    }`}
                 >
                   {activeFeature === "rpc" ? (
                     rpcActive ? (
@@ -3224,6 +3619,6 @@ export function App() {
         input[type="number"]::-webkit-inner-spin-button, input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
         input[type="number"] { -moz-appearance: textfield; }
       `}</style>
-    </div>
+    </div >
   );
 }
